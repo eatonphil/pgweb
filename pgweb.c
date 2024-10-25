@@ -1,15 +1,18 @@
-#include <sys/types.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include "postgres.h"
-#include "nodes/pg_list.h"
+
 #include "catalog/pg_type_d.h"
+#include "fmgr.h"
+#include "nodes/pg_list.h"
+#include "parser/parse_func.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/json.h"
 #include "utils/memutils.h"
 #include "utils/regproc.h"
-#include "fmgr.h"
 
 PG_MODULE_MAGIC;
 
@@ -62,11 +65,11 @@ static void
 pgweb_parse_request_url(char *buf, int buflen, int *bufp, PGWRequest *request, char **errmsg)
 {
   int bufp_original = *bufp;
-  int len;
-  char *key;
-  char *value;
-  PGWRequestParam *param;
-  bool path_found;
+  int len = 0;
+  char *key = NULL;
+  char *value = NULL;
+  PGWRequestParam *param = NULL;
+  bool path_found = false;
 
   request->params = NIL;
   while (*bufp < buflen && buf[*bufp] != ' ')
@@ -108,7 +111,7 @@ pgweb_parse_request_url(char *buf, int buflen, int *bufp, PGWRequest *request, c
   len = *bufp - bufp_original - 1;
   if (!path_found)
 	request->path = pnstrdup(buf + bufp_original, len);	
-  else if (strlen(key) > 0)
+  else if (key != NULL && strlen(key) > 0)
   {
 	param = palloc0(sizeof(PGWRequestParam));
 	param->key = key;
@@ -225,7 +228,7 @@ pgweb_handle_connection(int client_fd)
 	goto done;
   }
 
-  request = pgweb_parse_request(buf, buflen, &errmsg);
+  request = pgweb_parse_request(buf, n, &errmsg);
   if (errmsg != NULL)
 	goto done;
 
@@ -248,7 +251,7 @@ pgweb_handle_connection(int client_fd)
 
  done:
   if (errmsg)
-	pgweb_sendresponse(client_fd,
+	pgweb_send_response(client_fd,
 					   errcode,
 					   errcode == 404 ? "Not Found" : "Internal Server Error",
 					   errmsg);
@@ -260,8 +263,18 @@ PG_FUNCTION_INFO_V1(pgweb_register_get);
 Datum
 pgweb_register_get(PG_FUNCTION_ARGS)
 {
-  int32 arg = PG_GETARG_INT32(0);
-  elog(ERROR, "unimplemented");
+  MemoryContext oldctx;
+  PGWHandler *handler;
+
+  oldctx = MemoryContextSwitchTo(PGWServerContext);
+
+  handler = palloc(sizeof(PGWHandler));
+  handler->route = TextDatumGetCString(PG_GETARG_DATUM(0));
+  handler->funcname = TextDatumGetCString(PG_GETARG_DATUM(1));
+  handlers = lappend(handlers, handler);
+
+  MemoryContextSwitchTo(oldctx);
+
   PG_RETURN_VOID();
 }
 
@@ -272,14 +285,10 @@ pgweb_serve(PG_FUNCTION_ARGS)
   char *address;
   int32 port = PG_GETARG_INT32(1);
   int server_fd;
-  struct sockaddr_un my_addr;
-
-  PGWServerContext = AllocSetContextCreate(TopMemoryContext,
-										   "PGWServerContext",
-										   ALLOCSET_DEFAULT_SIZES);
+  struct sockaddr_in my_addr;
 
   MemoryContextSwitchTo(PGWServerContext);
-  address = text_to_cstring(PG_GETARG_TEXT_PP(0));
+  address = TextDatumGetCString(PG_GETARG_DATUM(0));
 
   memset(&my_addr, 0, sizeof(my_addr));
   my_addr.sin_family = AF_INET;
@@ -298,7 +307,7 @@ pgweb_serve(PG_FUNCTION_ARGS)
 
   while (1)
   {
-	struct sockaddr_un peer_addr;
+	struct sockaddr_in peer_addr;
 	socklen_t peer_addr_size;
 	int client_fd = accept(server_fd, (struct sockaddr *) &peer_addr, &peer_addr_size);
 	if (client_fd == -1)
@@ -315,4 +324,12 @@ Datum pgweb_shutdown(PG_FUNCTION_ARGS)
 {
   MemoryContextReset(PGWServerContext);
   PG_RETURN_VOID();
+}
+
+void _PG_init(void)
+{
+  
+  PGWServerContext = AllocSetContextCreate(TopMemoryContext,
+										   "PGWServerContext",
+										   ALLOCSET_DEFAULT_SIZES);
 }
