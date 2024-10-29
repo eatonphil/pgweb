@@ -50,14 +50,20 @@ pgweb_parse_request_method(char *buf, int buflen, int *bufp, char **errmsg)
   while (*bufp < buflen && buf[*bufp] != ' ')
 	(*bufp)++;
 
-  len = *bufp - bufp_original - 1;
-  if (len == 3 && strncmp(buf + bufp_original, "GET", len))
+  if (*bufp == buflen)
+  {
+	*errmsg = psprintf("Incomplete request: '%s'", pnstrdup(buf, buflen));
+	return -1;
+  }
+
+  len = *bufp - bufp_original;
+  if (len == 3 && strncmp(buf + bufp_original, "GET", len) == 0)
 	return PGW_REQUEST_METHOD_GET;
 
-  if (len == 4 && strncmp(buf + bufp_original, "POST", len))
+  if (len == 4 && strncmp(buf + bufp_original, "POST", len) == 0)
 	return PGW_REQUEST_METHOD_POST;
 
-  *errmsg = psprintf("Unsupported method: '%s'", pnstrdup(buf + bufp_original, len));
+  *errmsg = psprintf("Unsupported method: '%s', from '%s'", pnstrdup(buf + bufp_original, len), pnstrdup(buf, buflen));
   return -1;
 }
 
@@ -74,7 +80,7 @@ pgweb_parse_request_url(char *buf, int buflen, int *bufp, PGWRequest *request, c
   request->params = NIL;
   while (*bufp < buflen && buf[*bufp] != ' ')
   {
-	len = *bufp - bufp_original - 1;
+	len = *bufp - bufp_original;
 	if (buf[*bufp] == '?')
 	{
 	  request->path = pnstrdup(buf + bufp_original, len);
@@ -108,14 +114,15 @@ pgweb_parse_request_url(char *buf, int buflen, int *bufp, PGWRequest *request, c
 	(*bufp)++;
   }
 
-  len = *bufp - bufp_original - 1;
+  len = *bufp - bufp_original;
   if (!path_found)
 	request->path = pnstrdup(buf + bufp_original, len);	
   else if (key != NULL && strlen(key) > 0)
   {
 	param = palloc0(sizeof(PGWRequestParam));
 	param->key = key;
-	param->value = value;
+	param->value = pnstrdup(buf + bufp_original, len);
+	*bufp += len;
 	request->params = lappend(request->params, param);
   }
 }
@@ -163,7 +170,7 @@ pgweb_request_params_to_json(PGWRequest *request)
   appendStringInfoString(&json_string, "}");
 
   return DirectFunctionCall1(json_in,
-							 CStringGetTextDatum(json_string.data));
+							 CStringGetDatum(json_string.data));
 }
 
 static void
@@ -180,7 +187,10 @@ pgweb_send_response(int conn_fd, int code, char *status, char *body)
 					   body);
   ssize_t n = send(conn_fd, buf, strlen(buf), 0);
   if (n != strlen(buf))
-	elog(ERROR, "Failed to send response to client.");
+  {
+	int e = errno;
+	elog(ERROR, "Failed to send response to client: %s.", strerror(e));
+  }
 }
 
 static void
@@ -231,6 +241,8 @@ pgweb_handle_connection(int client_fd)
   request = pgweb_parse_request(buf, n, &errmsg);
   if (errmsg != NULL)
 	goto done;
+
+  request->conn_fd = client_fd;
 
   foreach (lc, handlers)
   {
@@ -285,25 +297,36 @@ pgweb_serve(PG_FUNCTION_ARGS)
   char *address;
   int32 port = PG_GETARG_INT32(1);
   int server_fd;
-  struct sockaddr_in my_addr;
+  struct sockaddr_in server_addr;
 
   MemoryContextSwitchTo(PGWServerContext);
   address = TextDatumGetCString(PG_GETARG_DATUM(0));
 
-  memset(&my_addr, 0, sizeof(my_addr));
-  my_addr.sin_family = AF_INET;
-  my_addr.sin_addr.s_addr = inet_addr(address);
-  my_addr.sin_port = htons(port);
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = htonl(INADDR_ANY); //inet_addr(address);
+  server_addr.sin_port = htons(port);
 
   server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd == -1)
-	elog(ERROR, "Could not create socket.");
+  {
+	int e = errno;
+	elog(ERROR, "Could not create socket: %s.", strerror(e));
+  }
 
-  if (bind(server_fd, (struct sockaddr *) &my_addr, sizeof(my_addr)) == -1)
-	elog(ERROR, "Could not bind to %s:%d.", address, port);
+  if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) == -1)
+  {
+	int e = errno;
+	elog(ERROR, "Could not bind to %s:%d: %s.", address, port, strerror(e));
+  }
 
   if (listen(server_fd, 10 /* Listen backlog. */) == -1)
-	elog(ERROR, "Could not listen to %s:%d.", address, port);
+  {
+	int e = errno;
+	elog(ERROR, "Could not listen to %s:%d: %s.", address, port, strerror(e));
+  }
+
+  elog(INFO, "Listening on %s:%d.", address, port);
 
   while (1)
   {
@@ -311,9 +334,14 @@ pgweb_serve(PG_FUNCTION_ARGS)
 	socklen_t peer_addr_size;
 	int client_fd = accept(server_fd, (struct sockaddr *) &peer_addr, &peer_addr_size);
 	if (client_fd == -1)
-	  elog(ERROR, "Could not accept connection.");
+	{
+	  int e = errno;
+	  elog(ERROR, "Could not accept connection: %s.", strerror(e));
+	}
 
+	elog(INFO, "Accepted new connection.");
 	pgweb_handle_connection(client_fd);
+	elog(INFO, "Completed connection.");
   }
 
   PG_RETURN_VOID();
