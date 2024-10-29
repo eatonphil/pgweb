@@ -262,7 +262,7 @@ pgweb_handle_request(PGWRequest *request, PGWHandler *handler, char **errmsg)
   pgweb_send_response(request->conn_fd, 200, "OK", msg);
 }
 
-static void
+static bool
 pgweb_handle_connection(int client_fd)
 {
   char *buf;
@@ -275,6 +275,7 @@ pgweb_handle_connection(int client_fd)
   MemoryContext oldctx;
   clock_t start = clock();
   clock_t stop;
+  bool stayalive = true;
 
   if (PGWConnectionContext == NULL)
 	PGWConnectionContext = AllocSetContextCreate(PGWServerContext,
@@ -298,6 +299,11 @@ pgweb_handle_connection(int client_fd)
 	goto done;
 
   request->conn_fd = client_fd;
+  if (strcmp(request->url, "/_exit") == 0)
+  {
+  	stayalive = false;
+	goto done;
+  }
 
   foreach (lc, handlers)
   {
@@ -332,6 +338,8 @@ pgweb_handle_connection(int client_fd)
   Assert(CurrentMemoryContext == PGWConnectionContext);
   MemoryContextReset(PGWConnectionContext);
   MemoryContextSwitchTo(oldctx);
+
+  return stayalive;
 }
 
 PG_FUNCTION_INFO_V1(pgweb_register_get);
@@ -402,7 +410,11 @@ pgweb_serve(PG_FUNCTION_ARGS)
 	  elog(ERROR, "Could not accept connection: %s.", strerror(e));
 	}
 
-	pgweb_handle_connection(client_fd);
+	if (!pgweb_handle_connection(client_fd))
+	{
+	  elog(INFO, "Shutting down.");
+	  break;
+	}
   }
 
   PG_RETURN_VOID();

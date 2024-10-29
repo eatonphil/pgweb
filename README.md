@@ -63,3 +63,9 @@ Now in another terminal you can curl the web server.
 $ curl 'localhost:9003/hello?name=James'
 Hello, James!
 ```
+
+To gracefully exit (very hacky), curl `/_exit`:
+
+```console
+$ curl 'localhost:9003/_exit'
+```
