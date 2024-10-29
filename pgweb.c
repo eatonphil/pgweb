@@ -417,12 +417,6 @@ pgweb_serve(PG_FUNCTION_ARGS)
 	}
   }
 
-  PG_RETURN_VOID();
-}
-
-PG_FUNCTION_INFO_V1(pgweb_shutdown);
-Datum pgweb_shutdown(PG_FUNCTION_ARGS)
-{
   MemoryContextReset(PGWServerContext);
   PG_RETURN_VOID();
 }
