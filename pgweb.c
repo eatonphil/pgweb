@@ -2,6 +2,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "postgres.h"
 
@@ -27,8 +28,8 @@ typedef struct PGWResponseCache {
   char *response;
 } PGWResponseCache;
 
-static MemoryContext PGWServerContext;
-static MemoryContext PGWConnectionContext;
+static MemoryContext PGWServerContext = NULL;
+static MemoryContext PGWConnectionContext = NULL;
 static List /* PGWHandler * */ *handlers;
 static List /* PGWResponseCache * */ *response_cache;
 
@@ -172,6 +173,8 @@ pgweb_request_params_to_json(PGWRequest *request)
   ListCell *lc;
   StringInfoData json_string;
 
+  Assert(CurrentMemoryContext == request->context);
+
   initStringInfo(&json_string);
   appendStringInfoString(&json_string, "{");
 
@@ -195,7 +198,7 @@ pgweb_request_params_to_json(PGWRequest *request)
 }
 
 static void
-pgweb_send_response(int conn_fd, int code, char *status, char *body)
+pgweb_send_response(PGWRequest *request, int code, char *status, char *body)
 {
   char *buf = psprintf("HTTP/1.1 %d %s\r\n"
 					   "Content-Length: %lu\r\n"
@@ -206,7 +209,10 @@ pgweb_send_response(int conn_fd, int code, char *status, char *body)
 					   status,
 					   strlen(body),
 					   body);
-  ssize_t n = send(conn_fd, buf, strlen(buf), 0);
+  ssize_t n = send(request->conn_fd, buf, strlen(buf), 0);
+
+  Assert(CurrentMemoryContext == request->context);
+
   if (n != strlen(buf))
   {
 	int e = errno;
@@ -259,7 +265,7 @@ pgweb_handle_request(PGWRequest *request, PGWHandler *handler, char **errmsg)
 	MemoryContextSwitchTo(request->context);
   }
 
-  pgweb_send_response(request->conn_fd, 200, "OK", msg);
+  pgweb_send_response(request, 200, "OK", msg);
 }
 
 static bool
@@ -324,10 +330,10 @@ pgweb_handle_connection(int client_fd)
 
  done:
   if (errmsg)
-	pgweb_send_response(client_fd,
-					   errcode,
-					   errcode == 404 ? "Not Found" : "Internal Server Error",
-					   errmsg);
+	pgweb_send_response(request,
+						errcode,
+						errcode == 404 ? "Not Found" : "Internal Server Error",
+						errmsg);
 
   stop = clock();
   elog(INFO, "[%fs] %s %s",
@@ -404,19 +410,23 @@ pgweb_serve(PG_FUNCTION_ARGS)
 	struct sockaddr_in peer_addr;
 	socklen_t peer_addr_size;
 	int client_fd = accept(server_fd, (struct sockaddr *) &peer_addr, &peer_addr_size);
+	bool stayalive;
 	if (client_fd == -1)
 	{
 	  int e = errno;
 	  elog(ERROR, "Could not accept connection: %s.", strerror(e));
 	}
 
-	if (!pgweb_handle_connection(client_fd))
+	stayalive = pgweb_handle_connection(client_fd);
+	close(client_fd);
+	if (!stayalive)
 	{
 	  elog(INFO, "Shutting down.");
 	  break;
 	}
   }
 
+  close(server_fd);
   MemoryContextReset(PGWServerContext);
   PG_RETURN_VOID();
 }
