@@ -22,6 +22,7 @@ typedef struct PGWHandler {
 } PGWHandler;
 
 static MemoryContext PGWServerContext;
+static MemoryContext PGWConnectionContext;
 static List /* PGWHandler * */ *handlers;
 
 typedef enum PGWRequestMethod {
@@ -36,6 +37,7 @@ typedef struct PGWRequestParam {
 
 typedef struct PGWRequest {
   int conn_fd;
+  char *buf;
   MemoryContext context;
   PGWRequestMethod method;
   char *path;
@@ -43,32 +45,35 @@ typedef struct PGWRequest {
 } PGWRequest;
 
 static PGWRequestMethod
-pgweb_parse_request_method(char *buf, int buflen, int *bufp, char **errmsg)
+pgweb_parse_request_method(PGWRequest *r, int buflen, int *bufp, char **errmsg)
 {
   int bufp_original = *bufp;
   int len;
-  while (*bufp < buflen && buf[*bufp] != ' ')
+
+  Assert(CurrentMemoryContext == r->context);
+  
+  while (*bufp < buflen && r->buf[*bufp] != ' ')
 	(*bufp)++;
 
   if (*bufp == buflen)
   {
-	*errmsg = psprintf("Incomplete request: '%s'", pnstrdup(buf, buflen));
+	*errmsg = psprintf("Incomplete request: '%s'", pnstrdup(r->buf, buflen));
 	return -1;
   }
 
   len = *bufp - bufp_original;
-  if (len == 3 && strncmp(buf + bufp_original, "GET", len) == 0)
+  if (len == 3 && strncmp(r->buf + bufp_original, "GET", len) == 0)
 	return PGW_REQUEST_METHOD_GET;
 
-  if (len == 4 && strncmp(buf + bufp_original, "POST", len) == 0)
+  if (len == 4 && strncmp(r->buf + bufp_original, "POST", len) == 0)
 	return PGW_REQUEST_METHOD_POST;
 
-  *errmsg = psprintf("Unsupported method: '%s', from '%s'", pnstrdup(buf + bufp_original, len), pnstrdup(buf, buflen));
+  *errmsg = psprintf("Unsupported method: '%s'", pnstrdup(r->buf + bufp_original, len));
   return -1;
 }
 
 static void
-pgweb_parse_request_url(char *buf, int buflen, int *bufp, PGWRequest *request, char **errmsg)
+pgweb_parse_request_url(PGWRequest *r, int buflen, int *bufp, char **errmsg)
 {
   int bufp_original = *bufp;
   int len = 0;
@@ -77,37 +82,39 @@ pgweb_parse_request_url(char *buf, int buflen, int *bufp, PGWRequest *request, c
   PGWRequestParam *param = NULL;
   bool path_found = false;
 
-  request->params = NIL;
-  while (*bufp < buflen && buf[*bufp] != ' ')
+  Assert(CurrentMemoryContext == r->context);
+
+  r->params = NIL;
+  while (*bufp < buflen && r->buf[*bufp] != ' ')
   {
 	len = *bufp - bufp_original;
-	if (buf[*bufp] == '?')
+	if (r->buf[*bufp] == '?')
 	{
-	  request->path = pnstrdup(buf + bufp_original, len);
+	  r->path = pnstrdup(r->buf + bufp_original, len);
 	  path_found = true;
 	  (*bufp)++;
 	  bufp_original = *bufp;
 	  continue;
 	}
 
-	if (buf[*bufp] == '=')
+	if (r->buf[*bufp] == '=')
 	{
-	  key = pnstrdup(buf + bufp_original, len);
+	  key = pnstrdup(r->buf + bufp_original, len);
 	  (*bufp)++;
 	  bufp_original = *bufp;
 	  continue;
 	}
 
-	if (buf[*bufp] == '&')
+	if (r->buf[*bufp] == '&')
 	{
-	  value = pnstrdup(buf + bufp_original, len);
+	  value = pnstrdup(r->buf + bufp_original, len);
 	  (*bufp)++;
 	  bufp_original = *bufp;
 
 	  param = palloc0(sizeof(PGWRequestParam));
 	  param->key = key;
 	  param->value = value;
-	  request->params = lappend(request->params, param);
+	  r->params = lappend(r->params, param);
 	  continue;
 	}
 
@@ -116,32 +123,35 @@ pgweb_parse_request_url(char *buf, int buflen, int *bufp, PGWRequest *request, c
 
   len = *bufp - bufp_original;
   if (!path_found)
-	request->path = pnstrdup(buf + bufp_original, len);	
+	r->path = pnstrdup(r->buf + bufp_original, len);	
   else if (key != NULL && strlen(key) > 0)
   {
 	param = palloc0(sizeof(PGWRequestParam));
 	param->key = key;
-	param->value = pnstrdup(buf + bufp_original, len);
+	param->value = pnstrdup(r->buf + bufp_original, len);
 	*bufp += len;
-	request->params = lappend(request->params, param);
+	r->params = lappend(r->params, param);
   }
 }
 
 static PGWRequest*
-pgweb_parse_request(char *buf, int buflen, char **errmsg)
+pgweb_parse_request(MemoryContext requestContext, char *buf, int buflen, char **errmsg)
 {
   int bufp = 0;
   PGWRequest *request = palloc0(sizeof(PGWRequest));
-  request->context = CurrentMemoryContext;
 
-  request->method = pgweb_parse_request_method(buf, buflen, &bufp, errmsg);
+  request->buf = buf;
+  request->context = requestContext;
+  Assert(CurrentMemoryContext == request->context);
+
+  request->method = pgweb_parse_request_method(request, buflen, &bufp, errmsg);
   if (request->method == -1)
 	return NULL;
 
-  Assert(buf[bufp] == ' ');
+  Assert(request->buf[bufp] == ' ');
   bufp++;
 
-  pgweb_parse_request_url(buf, buflen, &bufp, request, errmsg);
+  pgweb_parse_request_url(request, buflen, &bufp, errmsg);
   return request;
 }
 
@@ -219,14 +229,19 @@ pgweb_handle_connection(int client_fd)
 {
   char *buf;
   ssize_t n;
-  MemoryContext PGWConnectionContext = AllocSetContextCreate(PGWServerContext,
-															 "PGWConnectionContext",
-															 ALLOCSET_DEFAULT_SIZES);
   char *errmsg = NULL;
   ListCell *lc;
   PGWRequest *request = NULL;
   bool handler_found = false;
   int errcode = 500;
+  MemoryContext oldctx;
+
+  if (PGWConnectionContext == NULL)
+	PGWConnectionContext = AllocSetContextCreate(PGWServerContext,
+												 "PGWConnectionContext",
+												 ALLOCSET_DEFAULT_SIZES);
+
+  oldctx = MemoryContextSwitchTo(PGWConnectionContext);
 
   buf = palloc(4096);
   n = recv(client_fd, buf, 4096, 0);
@@ -238,7 +253,7 @@ pgweb_handle_connection(int client_fd)
 	goto done;
   }
 
-  request = pgweb_parse_request(buf, n, &errmsg);
+  request = pgweb_parse_request(PGWConnectionContext, buf, n, &errmsg);
   if (errmsg != NULL)
 	goto done;
 
@@ -269,6 +284,7 @@ pgweb_handle_connection(int client_fd)
 					   errmsg);
 
   MemoryContextReset(PGWConnectionContext);
+  MemoryContextSwitchTo(oldctx);
 }
 
 PG_FUNCTION_INFO_V1(pgweb_register_get);
