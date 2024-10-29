@@ -1,6 +1,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #include "postgres.h"
 
@@ -21,9 +22,15 @@ typedef struct PGWHandler {
   char *funcname;
 } PGWHandler;
 
+typedef struct PGWResponseCache {
+  char *url;
+  char *response;
+} PGWResponseCache;
+
 static MemoryContext PGWServerContext;
 static MemoryContext PGWConnectionContext;
 static List /* PGWHandler * */ *handlers;
+static List /* PGWResponseCache * */ *response_cache;
 
 typedef enum PGWRequestMethod {
   PGW_REQUEST_METHOD_GET,
@@ -40,6 +47,7 @@ typedef struct PGWRequest {
   char *buf;
   MemoryContext context;
   PGWRequestMethod method;
+  char *url;
   char *path;
   List /* PGWRequestParam * */ *params;
 } PGWRequest;
@@ -51,7 +59,7 @@ pgweb_parse_request_method(PGWRequest *r, int buflen, int *bufp, char **errmsg)
   int len;
 
   Assert(CurrentMemoryContext == r->context);
-  
+
   while (*bufp < buflen && r->buf[*bufp] != ' ')
 	(*bufp)++;
 
@@ -76,6 +84,7 @@ static void
 pgweb_parse_request_url(PGWRequest *r, int buflen, int *bufp, char **errmsg)
 {
   int bufp_original = *bufp;
+  int bufp_tmp = *bufp;
   int len = 0;
   char *key = NULL;
   char *value = NULL;
@@ -87,29 +96,29 @@ pgweb_parse_request_url(PGWRequest *r, int buflen, int *bufp, char **errmsg)
   r->params = NIL;
   while (*bufp < buflen && r->buf[*bufp] != ' ')
   {
-	len = *bufp - bufp_original;
+	len = *bufp - bufp_tmp;
 	if (r->buf[*bufp] == '?')
 	{
-	  r->path = pnstrdup(r->buf + bufp_original, len);
+	  r->path = pnstrdup(r->buf + bufp_tmp, len);
 	  path_found = true;
 	  (*bufp)++;
-	  bufp_original = *bufp;
+	  bufp_tmp = *bufp;
 	  continue;
 	}
 
 	if (r->buf[*bufp] == '=')
 	{
-	  key = pnstrdup(r->buf + bufp_original, len);
+	  key = pnstrdup(r->buf + bufp_tmp, len);
 	  (*bufp)++;
-	  bufp_original = *bufp;
+	  bufp_tmp = *bufp;
 	  continue;
 	}
 
 	if (r->buf[*bufp] == '&')
 	{
-	  value = pnstrdup(r->buf + bufp_original, len);
+	  value = pnstrdup(r->buf + bufp_tmp, len);
 	  (*bufp)++;
-	  bufp_original = *bufp;
+	  bufp_tmp = *bufp;
 
 	  param = palloc0(sizeof(PGWRequestParam));
 	  param->key = key;
@@ -123,15 +132,17 @@ pgweb_parse_request_url(PGWRequest *r, int buflen, int *bufp, char **errmsg)
 
   len = *bufp - bufp_original;
   if (!path_found)
-	r->path = pnstrdup(r->buf + bufp_original, len);	
+	r->path = pnstrdup(r->buf + bufp_original, len);
   else if (key != NULL && strlen(key) > 0)
   {
 	param = palloc0(sizeof(PGWRequestParam));
 	param->key = key;
-	param->value = pnstrdup(r->buf + bufp_original, len);
+	param->value = pnstrdup(r->buf + bufp_tmp, *bufp - bufp_tmp);
 	*bufp += len;
 	r->params = lappend(r->params, param);
   }
+
+  r->url = pnstrdup(r->buf + bufp_original, len);
 }
 
 static PGWRequest*
@@ -206,22 +217,49 @@ pgweb_send_response(int conn_fd, int code, char *status, char *body)
 static void
 pgweb_handle_request(PGWRequest *request, PGWHandler *handler, char **errmsg)
 {
-  List *func_name_list = stringToQualifiedNameList(handler->funcname, NULL);
-  Oid argtypes[] = {JSONOID};
-  Oid func_oid = LookupFuncName(func_name_list,
-								sizeof(argtypes) / sizeof(Oid),
-								argtypes,
-								false);
-  FmgrInfo func_info;
-  Datum params = pgweb_request_params_to_json(request);
-  Datum result;
-  
-  Assert(CurrentMemoryContext == request->context);
+  ListCell *lc;
+  char *msg = NULL;
+  PGWResponseCache *cached = NULL;
 
-  fmgr_info(func_oid, &func_info);
-  result = FunctionCall1(&func_info, params);
+  // If there's a cached response, use it.
+  foreach (lc, response_cache)
+  {
+	cached = lfirst(lc);
+	if (strcmp(cached->url, request->url) == 0)
+	{
+	  msg = cached->response;
+	  elog(INFO, "Cached request.");
+	  break;
+	}
+  }
 
-  pgweb_send_response(request->conn_fd, 200, "OK", TextDatumGetCString(result));
+  if (msg == NULL)
+  {
+	List *func_name_list = stringToQualifiedNameList(handler->funcname, NULL);
+	Oid argtypes[] = {JSONOID};
+	Oid func_oid = LookupFuncName(func_name_list,
+								  sizeof(argtypes) / sizeof(Oid),
+								  argtypes,
+								  false);
+	FmgrInfo func_info;
+	Datum params = pgweb_request_params_to_json(request);
+	Datum result;
+
+	fmgr_info(func_oid, &func_info);
+	result = FunctionCall1(&func_info, params);
+	msg = TextDatumGetCString(result);
+
+	/* Cache this response for the future. */
+	Assert(CurrentMemoryContext == request->context);
+	MemoryContextSwitchTo(PGWServerContext);
+	cached = palloc0(sizeof(*cached));
+	cached->url = pstrdup(request->url);
+	cached->response = pstrdup(msg);
+	response_cache = lappend(response_cache, cached);
+	MemoryContextSwitchTo(request->context);
+  }
+
+  pgweb_send_response(request->conn_fd, 200, "OK", msg);
 }
 
 static void
@@ -235,6 +273,8 @@ pgweb_handle_connection(int client_fd)
   bool handler_found = false;
   int errcode = 500;
   MemoryContext oldctx;
+  clock_t start = clock();
+  clock_t stop;
 
   if (PGWConnectionContext == NULL)
 	PGWConnectionContext = AllocSetContextCreate(PGWServerContext,
@@ -283,6 +323,13 @@ pgweb_handle_connection(int client_fd)
 					   errcode == 404 ? "Not Found" : "Internal Server Error",
 					   errmsg);
 
+  stop = clock();
+  elog(INFO, "[%fs] %s %s",
+	   (double)(stop - start) / CLOCKS_PER_SEC,
+	   request->method == PGW_REQUEST_METHOD_GET ? "GET" : "POST",
+	   request->url);
+
+  Assert(CurrentMemoryContext == PGWConnectionContext);
   MemoryContextReset(PGWConnectionContext);
   MemoryContextSwitchTo(oldctx);
 }
@@ -355,9 +402,7 @@ pgweb_serve(PG_FUNCTION_ARGS)
 	  elog(ERROR, "Could not accept connection: %s.", strerror(e));
 	}
 
-	elog(INFO, "Accepted new connection.");
 	pgweb_handle_connection(client_fd);
-	elog(INFO, "Completed connection.");
   }
 
   PG_RETURN_VOID();
@@ -372,7 +417,7 @@ Datum pgweb_shutdown(PG_FUNCTION_ARGS)
 
 void _PG_init(void)
 {
-  
+
   PGWServerContext = AllocSetContextCreate(TopMemoryContext,
 										   "PGWServerContext",
 										   ALLOCSET_DEFAULT_SIZES);
