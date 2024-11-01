@@ -6,9 +6,9 @@ CREATE SCHEMA pgweb;
 -- Registers a route with a Postgres function handler.
 -- Example:
 --   DROP FUNCTION IF EXISTS handle_hello_world
---   CREATE FUNCTION handle_hello_world(params HSTORE) RETURNS TEXT AS $$
+--   CREATE FUNCTION handle_hello_world(params JSON) RETURNS TEXT AS $$
 --   BEGIN
---     RETURN 'Hello, ' || params['name'] || '!';
+--     RETURN 'Hello, ' || (params->>'name') || E'!\n';
 --   END;
 --   $$ LANGUAGE plpgsql;
 --
