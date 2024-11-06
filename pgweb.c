@@ -316,8 +316,8 @@ pgweb_handle_connection(int client_fd)
 
 	if (PGWRequestContext == NULL)
 		PGWRequestContext = AllocSetContextCreate(PGWServerContext,
-													 "PGWRequestContext",
-													 ALLOCSET_DEFAULT_SIZES);
+												  "PGWRequestContext",
+												  ALLOCSET_DEFAULT_SIZES);
 
 	oldctx = MemoryContextSwitchTo(PGWRequestContext);
 
