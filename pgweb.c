@@ -53,13 +53,6 @@ pgweb_register_get(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
-typedef struct PGWResponseCache {
-	char *url;
-	char *response;
-} PGWResponseCache;
-
-static List /* PGWResponseCache * */ *response_cache;
-
 /* Single global per-connection context is fine since we only ever have a single concurrent connection. */
 static MemoryContext PGWRequestContext = NULL;
 
@@ -250,6 +243,13 @@ pgweb_request_params_to_json(PGWRequest *request)
 	return DirectFunctionCall1(json_in,
 							   CStringGetDatum(json_string.data));
 }
+
+typedef struct PGWResponseCache {
+	char *url;
+	char *response;
+} PGWResponseCache;
+
+static List /* PGWResponseCache * */ *response_cache;
 
 static void
 pgweb_handle_request(PGWRequest *request, PGWHandler *handler, char **errmsg)
