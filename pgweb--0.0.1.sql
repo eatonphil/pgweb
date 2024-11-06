@@ -20,12 +20,12 @@ GRANT EXECUTE ON FUNCTION pgweb.register_get(TEXT, TEXT) TO PUBLIC;
 
 -- Starts the web server at the address and port.
 -- Example:
---   SELECT pgweb.serve('localhost', 9090);
+--   SELECT pgweb.serve('127.0.0.1', 9090);
 CREATE OR REPLACE FUNCTION pgweb.serve(TEXT, INT)
 RETURNS VOID AS 'pgweb', 'pgweb_serve'
 LANGUAGE C STRICT;
 GRANT EXECUTE ON FUNCTION pgweb.serve(TEXT, INT) TO PUBLIC;
 
 -- Example:
---  $ curl localhost:9090/hello?name=Phil
+--  $ curl 127.0.0.1:9090/hello?name=Phil
 --  Hello, Phil!

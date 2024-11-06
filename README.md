@@ -54,18 +54,18 @@ CREATE FUNCTION
 
 (1 row)
 
-psql:test.sql:13: INFO:  Listening on localhost:9003.
+psql:test.sql:13: INFO:  Listening on 127.0.0.1:9003.
 ```
 
 Now in another terminal you can curl the web server.
 
 ```console
-$ curl 'localhost:9003/hello?name=James'
+$ curl '127.0.0.1:9003/hello?name=James'
 Hello, James!
 ```
 
 To gracefully exit (very hacky), curl `/_exit`:
 
 ```console
-$ curl 'localhost:9003/_exit'
+$ curl '127.0.0.1:9003/_exit'
 ```
