@@ -13,4 +13,4 @@ SELECT pg_backend_pid();
 
 SELECT pgweb.register_get('/hello', 'handle_hello_world');
 
-SELECT pgweb.serve('localhost', 9003);
+SELECT pgweb.serve('127.0.0.1', 9003);

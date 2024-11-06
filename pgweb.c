@@ -198,6 +198,29 @@ pgweb_parse_request(PGWRequest *request, char *buf, int buflen, char **errmsg)
 	pgweb_parse_request_url(request, buflen, &bufp, errmsg);
 }
 
+static void
+pgweb_send_response(PGWRequest *request, int code, char *status, char *body)
+{
+	char *buf = psprintf("HTTP/1.1 %d %s\r\n"
+						 "Content-Length: %lu\r\n"
+						 "Content-Type: text/plain\r\n"
+						 "\r\n"
+						 "%s",
+						 code,
+						 status,
+						 strlen(body),
+						 body);
+	ssize_t n = send(request->conn_fd, buf, strlen(buf), 0);
+
+	Assert(CurrentMemoryContext == PGWRequestContext);
+
+	if (n != strlen(buf))
+	{
+		int e = errno;
+		elog(ERROR, "Failed to send response to client: %s.", strerror(e));
+	}
+}
+
 static Datum
 pgweb_request_params_to_json(PGWRequest *request)
 {
@@ -229,36 +252,13 @@ pgweb_request_params_to_json(PGWRequest *request)
 }
 
 static void
-pgweb_send_response(PGWRequest *request, int code, char *status, char *body)
-{
-	char *buf = psprintf("HTTP/1.1 %d %s\r\n"
-						 "Content-Length: %lu\r\n"
-						 "Content-Type: text/plain\r\n"
-						 "\r\n"
-						 "%s",
-						 code,
-						 status,
-						 strlen(body),
-						 body);
-	ssize_t n = send(request->conn_fd, buf, strlen(buf), 0);
-
-	Assert(CurrentMemoryContext == PGWRequestContext);
-
-	if (n != strlen(buf))
-	{
-		int e = errno;
-		elog(ERROR, "Failed to send response to client: %s.", strerror(e));
-	}
-}
-
-static void
 pgweb_handle_request(PGWRequest *request, PGWHandler *handler, char **errmsg)
 {
 	ListCell *lc;
 	char *msg = NULL;
 	PGWResponseCache *cached = NULL;
 
-	// If there's a cached response, use it.
+	/* If there's a cached response, use it. */
 	foreach (lc, response_cache)
 	{
 		cached = lfirst(lc);
@@ -270,7 +270,8 @@ pgweb_handle_request(PGWRequest *request, PGWHandler *handler, char **errmsg)
 		}
 	}
 
-	if (msg == NULL)
+	/* No cached response, run the route handler! */
+	if (!msg)
 	{
 		List *func_name_list = stringToQualifiedNameList(handler->funcname, NULL);
 		Oid argtypes[] = {JSONOID};
@@ -324,7 +325,7 @@ pgweb_handle_connection(int client_fd)
 	buf = palloc(4096);
 	n = recv(client_fd, buf, 4096, 0);
 
-	// Let's just not support longer requests.
+	/* Let's just not support longer requests. */
 	if (n == 4096)
 	{
 		errmsg = "Request is too long.";
@@ -392,7 +393,7 @@ pgweb_serve(PG_FUNCTION_ARGS)
 
 	memset(&server_addr, 0, sizeof(server_addr));
 	server_addr.sin_family = AF_INET;
-	server_addr.sin_addr.s_addr = htonl(INADDR_ANY); //inet_addr(address);
+	server_addr.sin_addr.s_addr = inet_addr(address);
 	server_addr.sin_port = htons(port);
 
 	server_fd = socket(AF_INET, SOCK_STREAM, 0);

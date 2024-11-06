@@ -41,7 +41,7 @@ $$ LANGUAGE plpgsql;
 
 SELECT pgweb.register_get('/hello', 'handle_hello_world');
 
-SELECT pgweb.serve('localhost', 9003);
+SELECT pgweb.serve('127.0.0.1', 9003);
 $ psql postgres -f test.sql
 psql:test.sql:1: NOTICE:  extension "pgweb" does not exist, skipping
 DROP EXTENSION
