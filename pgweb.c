@@ -315,6 +315,8 @@ pgweb_handle_connection(int client_fd)
 	bool stayalive = true;
 	PGWRequest request;
 
+	memset(&request, 0, sizeof(request));
+
 	if (PGWRequestContext == NULL)
 		PGWRequestContext = AllocSetContextCreate(PGWServerContext,
 												  "PGWRequestContext",
